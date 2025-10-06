@@ -13,10 +13,21 @@ app.secret_key = os.getenv('FLASK_SECRET_KEY')
 CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
 app.register_blueprint(auth_bp, url_prefix='/api/auth')
 
+@app.route('/api/dashboard_counts', methods=['GET'])
+def get_dashboard_counts():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+    counts = db_connector.get_dashboard_counts()
+    return jsonify(counts)
+
 @app.route('/api/employees', methods=['GET'])
 def get_employees():
     if 'user' not in session: return jsonify({"error": "Unauthorized"}), 401
-    employees, total_rows = db_connector.fetch_archived_employees(search_term=request.args.get('search'))
+    employees, total_rows = db_connector.fetch_archived_employees(
+        search_term=request.args.get('search'),
+        status=request.args.get('status'),
+        filter_type=request.args.get('filter_type')
+    )
     return jsonify({"employees": employees, "total_employees": total_rows})
 
 @app.route('/api/employees', methods=['POST'])
