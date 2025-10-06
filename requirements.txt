@@ -1,0 +1,6 @@
+Flask
+oracledb
+python-dotenv
+zeep
+waitress
+Flask-Cors

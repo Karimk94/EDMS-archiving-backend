@@ -1,0 +1,19 @@
+#Python
+venv/
+pycache/
+*.pyc
+*.pyo
+*.pyd
+/thumbnail_cache
+/video_cache
+__pycache__/
+*.pyc
+
+#Environment files
+.env
+
+#IDE and OS files
+.idea/
+.vscode/
+*.DS_Store
+*.xlsx
