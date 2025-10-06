@@ -115,7 +115,7 @@ def fetch_archived_employees(page=1, page_size=20, search_term=None, status=None
 
             fetch_query = f"""
                 SELECT DISTINCT arch.SYSTEM_ID, TRIM(hr.FULLNAME_EN) as FULLNAME_EN, TRIM(hr.FULLNAME_AR) as FULLNAME_AR, TRIM(hr.EMPNO) as EMPNO, TRIM(hr.DEPARTEMENT) as DEPARTMENT, TRIM(hr.SECTION) as SECTION,
-                       TRIM(stat.NAME_ENGLISH) as STATUS_EN, TRIM(stat.NAME_ARABIC) as STATUS_AR, TRIM(hr.JOB_NAME) as JOB_NAME
+                       TRIM(stat.NAME_ENGLISH) as STATUS_EN, TRIM(stat.NAME_ARABIC) as STATUS_AR
                 {base_query} {final_where_clause} ORDER BY arch.SYSTEM_ID DESC
                 OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
             """
@@ -127,7 +127,16 @@ def fetch_archived_employees(page=1, page_size=20, search_term=None, status=None
             for row in cursor.fetchall():
                 emp = dict(zip(columns, row))
                 
-                # Fetch judicial card details
+                cursor.execute("""
+                    SELECT 1
+                    FROM LKP_PTA_EMP_DOCS doc
+                    JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                    WHERE doc.PTA_EMP_ARCH_ID = :1 AND (TRIM(dt.NAME) LIKE '%Warrant Decisions%' OR TRIM(dt.NAME) LIKE '%القرارات الخاصة بالضبطية%') AND doc.DISABLED = '0'
+                    AND ROWNUM = 1
+                """, [emp['system_id']])
+                warrant_decision_doc = cursor.fetchone()
+                emp['warrant_status'] = 'توجد / Yes' if warrant_decision_doc else 'لا توجد / No'
+
                 cursor.execute("""
                     SELECT doc.EXPIRY
                     FROM LKP_PTA_EMP_DOCS doc
@@ -135,8 +144,6 @@ def fetch_archived_employees(page=1, page_size=20, search_term=None, status=None
                     WHERE doc.PTA_EMP_ARCH_ID = :1 AND (TRIM(dt.NAME) LIKE '%Judicial Card%' OR TRIM(dt.NAME) LIKE '%بطاقة الضبطية%') AND doc.DISABLED = '0'
                 """, [emp['system_id']])
                 judicial_card = cursor.fetchone()
-                
-                emp['warrant_status'] = 'توجد / Yes' if 'ضبط' in (emp.get('job_name') or '') else 'لا توجد / No'
                 
                 if judicial_card:
                     emp['card_status'] = 'توجد / Yes'
@@ -219,7 +226,7 @@ def fetch_document_types():
             for row in cursor:
                 doc_type_obj = {'system_id': row[0], 'name': row[1]}
                 doc_types['all_types'].append(doc_type_obj)
-                if row[2] == '1':
+                if row[2] and str(row[2]).strip() == '1':
                     doc_types['types_with_expiry'].append(doc_type_obj)
     finally:
         if conn: conn.close()
@@ -250,11 +257,18 @@ def fetch_single_archived_employee(archive_id):
             if not row: return None
             employee_details = dict(zip(columns, row))
             
-            doc_query = "SELECT d.SYSTEM_ID, d.DOCNUMBER, d.DOC_TYPE_ID, d.EXPIRY, d.LEGISLATION_ID, TRIM(dt.NAME) as DOC_NAME FROM LKP_PTA_EMP_DOCS d JOIN LKP_PTA_DOC_TYPES dt ON d.DOC_TYPE_ID = dt.SYSTEM_ID WHERE d.PTA_EMP_ARCH_ID = :1 AND d.DISABLED = '0'"
+            doc_query = "SELECT d.SYSTEM_ID, d.DOCNUMBER, d.DOC_TYPE_ID, d.EXPIRY, d.LEGISLATION_ID, TRIM(dt.NAME) as DOC_NAME, TRIM(l.NAME) as LEGISLATION_NAME FROM LKP_PTA_EMP_DOCS d JOIN LKP_PTA_DOC_TYPES dt ON d.DOC_TYPE_ID = dt.SYSTEM_ID LEFT JOIN LKP_PTA_LEGISL l ON d.LEGISLATION_ID = l.SYSTEM_ID WHERE d.PTA_EMP_ARCH_ID = :1 AND d.DISABLED = '0'"
 
             cursor.execute(doc_query, [archive_id])
             doc_columns = [col[0].lower() for col in cursor.description]
-            employee_details['documents'] = [dict(zip(doc_columns, doc_row)) for doc_row in cursor.fetchall()]
+            
+            documents = []
+            for doc_row in cursor.fetchall():
+                doc_dict = dict(zip(doc_columns, doc_row))
+                if doc_dict.get('expiry') and hasattr(doc_dict['expiry'], 'strftime'):
+                    doc_dict['expiry'] = doc_dict['expiry'].strftime('%Y-%m-%d')
+                documents.append(doc_dict)
+            employee_details['documents'] = documents
     finally:
         if conn: conn.close()
     return employee_details
