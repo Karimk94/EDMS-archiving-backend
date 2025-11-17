@@ -159,10 +159,17 @@ def get_dashboard_counts():
 
             # Active employees
             cursor.execute("""
-                           SELECT COUNT(*)
+                           SELECT COUNT(DISTINCT arch.SYSTEM_ID)
                            FROM LKP_PTA_EMP_ARCH arch
                                     JOIN LKP_PTA_EMP_STATUS stat ON arch.STATUS_ID = stat.SYSTEM_ID
                            WHERE TRIM(stat.NAME_ENGLISH) = 'Active'
+                             AND EXISTS (SELECT 1
+                                         FROM LKP_PTA_EMP_DOCS doc
+                                                  JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                                         WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
+                                           AND (TRIM(dt.NAME) LIKE '%Judicial Card%' OR
+                                                TRIM(dt.NAME) LIKE '%بطاقة الضبطية%')
+                                           AND doc.DISABLED = '0')
                            """)
             counts["active_employees"] = cursor.fetchone()[0]
 
@@ -175,13 +182,16 @@ def get_dashboard_counts():
                            """)
             counts["inactive_employees"] = cursor.fetchone()[0]
 
-            # Expiring Soon (in the next 30 days)
+            # Expiring Soon or Expired (in the next 30 days or already expired)
             cursor.execute("""
                            SELECT COUNT(DISTINCT arch.SYSTEM_ID)
                            FROM LKP_PTA_EMP_ARCH arch
                                     JOIN LKP_PTA_EMP_DOCS doc ON arch.SYSTEM_ID = doc.PTA_EMP_ARCH_ID
-                           WHERE doc.EXPIRY BETWEEN SYSDATE AND SYSDATE + 30
-                             AND doc.DISABLED = '0'
+                                    JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                           WHERE doc.DISABLED = '0'
+                             AND (TRIM(dt.NAME) LIKE '%Judicial Card%' OR TRIM(dt.NAME) LIKE '%بطاقة الضبطية%')
+                             AND doc.EXPIRY IS NOT NULL
+                             AND doc.EXPIRY < (SYSDATE + 30)
                            """)
             counts["expiring_soon"] = cursor.fetchone()[0]
     finally:
@@ -210,43 +220,43 @@ def fetch_archived_employees(page=1, page_size=20, search_term=None, status=None
 
     # Handle filter_type logic
     if filter_type == 'has_warrant':
-        # Find employees who HAVE a valid warrant document
+        # MODIFIED: Find employees who HAVE a Judicial Card (per user request)
         where_clauses.append("""
-            EXISTS (
-                SELECT 1
-                FROM LKP_PTA_EMP_DOCS doc
-                JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
-                WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
-                  AND (TRIM(dt.NAME) LIKE '%Warrant Decisions%' OR TRIM(dt.NAME) LIKE '%القرارات الخاصة بالضبطية%')
-                  AND doc.DISABLED = '0'
-                  AND doc.EXPIRY >= SYSDATE 
-            )
-        """)
+                EXISTS (
+                    SELECT 1
+                    FROM LKP_PTA_EMP_DOCS doc
+                    JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                    WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
+                      AND (TRIM(dt.NAME) LIKE '%Judicial Card%' OR TRIM(dt.NAME) LIKE '%بطاقة الضبطية%')
+                      AND doc.DISABLED = '0'
+                )
+            """)
     elif filter_type == 'no_warrant':
-        # Find employees who DO NOT HAVE a valid warrant document
+        # MODIFIED: Find employees who DO NOT HAVE a Judicial Card
         where_clauses.append("""
-            NOT EXISTS (
-                SELECT 1
-                FROM LKP_PTA_EMP_DOCS doc
-                JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
-                WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
-                  AND (TRIM(dt.NAME) LIKE '%Warrant Decisions%' OR TRIM(dt.NAME) LIKE '%القرارات الخاصة بالضبطية%')
-                  AND doc.DISABLED = '0'
-                  AND doc.EXPIRY >= SYSDATE
-            )
-        """)
+                NOT EXISTS (
+                    SELECT 1
+                    FROM LKP_PTA_EMP_DOCS doc
+                    JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                    WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
+                      AND (TRIM(dt.NAME) LIKE '%Judicial Card%' OR TRIM(dt.NAME) LIKE '%بطاقة الضبطية%')
+                      AND doc.DISABLED = '0'
+                )
+            """)
     elif filter_type == 'expiring_soon_or_expired':
         # Find employees who have ANY document expiring soon or already expired
         where_clauses.append("""
-            EXISTS (
-                SELECT 1
-                FROM LKP_PTA_EMP_DOCS doc
-                WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
-                  AND doc.DISABLED = '0'
-                  AND doc.EXPIRY IS NOT NULL
-                  AND doc.EXPIRY < (SYSDATE + 30)
-            )
-        """)
+                    EXISTS (
+                        SELECT 1
+                        FROM LKP_PTA_EMP_DOCS doc
+                        JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                        WHERE doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
+                          AND (TRIM(dt.NAME) LIKE '%Judicial Card%' OR TRIM(dt.NAME) LIKE '%بطاقة الضبطية%')
+                          AND doc.DISABLED = '0'
+                          AND doc.EXPIRY IS NOT NULL
+                          AND doc.EXPIRY < (SYSDATE + 30)
+                    )
+                """)
 
     final_where_clause = "WHERE " + " AND ".join(where_clauses) if where_clauses else ""
     try:
@@ -671,3 +681,129 @@ def update_archived_employee(dst, dms_user, archive_id, employee_data, new_docum
         return False, f"Update transaction failed: {e}"
     finally:
         if conn: conn.close()
+
+def bulk_add_employees_from_excel(employees_data):
+    conn = get_connection()
+    if not conn:
+        return 0, len(employees_data), ["Database connection failed."]
+
+    success_count = 0
+    fail_count = 0
+    errors = []
+
+    try:
+        with conn.cursor() as cursor:
+            # Get all statuses and HR employees into maps for efficiency
+            cursor.execute("SELECT SYSTEM_ID, TRIM(NAME_ENGLISH) FROM LKP_PTA_EMP_STATUS")
+            status_map = {name.upper(): sid for sid, name in cursor.fetchall() if name}
+
+            cursor.execute("SELECT SYSTEM_ID, TRIM(EMPNO) FROM lkp_hr_employees")
+            hr_map = {empno: sid for sid, empno in cursor.fetchall() if empno}
+
+            cursor.execute("SELECT EMPLOYEE_ID FROM LKP_PTA_EMP_ARCH WHERE EMPLOYEE_ID IS NOT NULL")
+            archived_ids = {row[0] for row in cursor.fetchall()}
+
+            inactive_status_id = status_map.get('INACTIVE')
+            if not inactive_status_id:
+                logging.warning("Default status 'Inactive' not found in LKP_PTA_EMP_STATUS.")
+                # Try to get *any* status if 'Inactive' is missing
+                if status_map:
+                    inactive_status_id = next(iter(status_map.values()))
+                else:
+                    inactive_status_id = None  # Last resort
+
+            for index, emp in enumerate(employees_data):
+                row_num = index + 2  # For error reporting (since header is row 1)
+                try:
+                    empno = str(emp.get('empno')).strip()
+                    if not empno:
+                        errors.append(f"Row {row_num}: Missing Employee ID (empno).")
+                        fail_count += 1
+                        continue
+
+                    employee_id = hr_map.get(empno)
+                    if not employee_id:
+                        errors.append(
+                            f"Row {row_num}: Employee ID '{empno}' not found in HR system (lkp_hr_employees).")
+                        fail_count += 1
+                        continue
+
+                    if employee_id in archived_ids:
+                        errors.append(f"Row {row_num}: Employee '{empno}' is already archived.")
+                        fail_count += 1
+                        continue
+
+                    status_name = str(emp.get('status_name', '')).strip().upper()
+                    status_id = status_map.get(status_name, inactive_status_id)  # Default to inactive
+
+                    # 1. Update lkp_hr_employees
+                    hr_update_query = """
+                                      UPDATE lkp_hr_employees
+                                      SET FULLNAME_EN    = :fullname_en,
+                                          FULLNAME_AR    = :fullname_ar,
+                                          NATIONALITY    = :nationality,
+                                          JOB_NAME       = :job_name,
+                                          SUPERVISORNAME = :manager,
+                                          MOBILE         = :phone,
+                                          EMAIL          = :email,
+                                          SECTION        = :section,
+                                          DEPARTEMENT    = :department
+                                      WHERE SYSTEM_ID = :employee_id \
+                                      """
+                    cursor.execute(hr_update_query, {
+                        'fullname_en': emp.get('name_en'),
+                        'fullname_ar': emp.get('name_ar'),
+                        'nationality': emp.get('nationality'),
+                        'job_name': emp.get('job_title'),
+                        'manager': emp.get('manager'),
+                        'phone': emp.get('phone'),
+                        'email': emp.get('email'),
+                        'section': emp.get('section'),
+                        'department': emp.get('department'),
+                        'employee_id': employee_id
+                    })
+
+                    # 2. Insert into LKP_PTA_EMP_ARCH
+                    cursor.execute("SELECT NVL(MAX(SYSTEM_ID), 0) + 1 FROM LKP_PTA_EMP_ARCH")
+                    new_archive_id = cursor.fetchone()[0]
+
+                    hire_date = emp.get('hire_date')
+
+                    archive_query = """
+                                    INSERT INTO LKP_PTA_EMP_ARCH
+                                        (SYSTEM_ID, EMPLOYEE_ID, STATUS_ID, HIRE_DATE, DISABLED, LAST_UPDATE)
+                                    VALUES (:1, :2, :3, TO_DATE(:4, 'DD/MM/YYYY'), '0', SYSDATE) \
+                                    """
+                    cursor.execute(archive_query, [
+                        new_archive_id,
+                        employee_id,
+                        status_id,
+                        hire_date if hire_date else None
+                    ])
+
+                    success_count += 1
+                    archived_ids.add(employee_id)  # Add to set to prevent duplicates in same run
+
+                except oracledb.Error as db_err:
+                    errors.append(f"Row {row_num} (EmpID: {emp.get('empno')}): DB Error - {db_err}")
+                    fail_count += 1
+                except Exception as e:
+                    errors.append(f"Row {row_num} (EmpID: {emp.get('empno')}): General Error - {str(e)}")
+                    fail_count += 1
+
+        if fail_count > 0:
+            conn.rollback()
+            errors.insert(0, "Transaction rolled back due to errors. No employees were added.")
+            return 0, fail_count, errors
+        else:
+            conn.commit()
+            return success_count, fail_count, errors
+
+    except Exception as e:
+        conn.rollback()
+        logging.error(f"Error in bulk_add_employees_from_excel: {e}", exc_info=True)
+        return 0, len(employees_data), [f"An unexpected transaction error occurred: {str(e)}"]
+
+    finally:
+        if conn:
+            conn.close()

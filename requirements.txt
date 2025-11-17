@@ -4,3 +4,4 @@ python-dotenv
 zeep
 flask-cors
 waitress
+openpyxl

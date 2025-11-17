@@ -10,6 +10,9 @@ import math
 from functools import wraps
 from datetime import timedelta
 import mimetypes
+import csv
+import io
+import openpyxl
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -266,6 +269,126 @@ def get_document_file(docnumber):
     else:
         logging.warning(f"Document not found or retrieval failed for docnumber: {docnumber}")
         return jsonify({"error": "Document not found or could not be retrieved from DMS."}), 404
+
+
+@app.route('/api/employees/bulk-upload', methods=['POST'])
+@editor_required
+def bulk_upload_employees():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file']
+
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    employees_data = []
+
+    try:
+        # Define expected columns based on the image/CSV from previous step
+        expected_headers = [
+            "Employee ID", "Name (AR)", "Name (EN)", "Hire Date",
+            "Nationality", "Job Title", "Manager", "Phone", "Email",
+            "Employee Status", "Section", "Department"
+        ]
+
+        if file.filename.endswith('.xlsx'):
+            workbook = openpyxl.load_workbook(file.stream)
+            sheet = workbook.active
+
+            # Read header
+            header_cells = next(sheet.iter_rows(min_row=1, max_row=1))
+            header = [cell.value for cell in header_cells]
+
+            # Basic header validation
+            if not all(h in header for h in expected_headers):
+                return jsonify({
+                                   "error": f"Invalid Excel format. Missing one or more headers. Expected: {', '.join(expected_headers)}"}), 400
+
+            header_map = {h: i for i, h in enumerate(header)}
+
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                if all(c is None for c in row):  # Skip empty rows
+                    continue
+
+                # Handle different date formats from Excel
+                hire_date_val = row[header_map["Hire Date"]]
+                hire_date_str = None
+                if isinstance(hire_date_val, datetime):
+                    hire_date_str = hire_date_val.strftime('%d/%m/%Y')
+                elif isinstance(hire_date_val, str):
+                    hire_date_str = hire_date_val  # Assume it's in DD/MM/YYYY format
+
+                emp_data = {
+                    "empno": row[header_map["Employee ID"]],
+                    "name_ar": row[header_map["Name (AR)"]],
+                    "name_en": row[header_map["Name (EN)"]],
+                    "hire_date": hire_date_str,
+                    "nationality": row[header_map["Nationality"]],
+                    "job_title": row[header_map["Job Title"]],
+                    "manager": row[header_map["Manager"]],
+                    "phone": row[header_map["Phone"]],
+                    "email": row[header_map["Email"]],
+                    "status_name": row[header_map["Employee Status"]],
+                    "section": row[header_map["Section"]],
+                    "department": row[header_map["Department"]]
+                }
+                employees_data.append(emp_data)
+
+        elif file.filename.endswith('.csv'):
+            stream = io.StringIO(file.stream.read().decode("utf-8-sig"), newline=None)  # Use utf-8-sig to handle BOM
+            csv_reader = csv.reader(stream)
+
+            header = next(csv_reader)
+
+            if not all(h in header for h in expected_headers):
+                return jsonify({
+                                   "error": f"Invalid CSV format. Missing one or more headers. Expected: {', '.join(expected_headers)}"}), 400
+
+            header_map = {h: i for i, h in enumerate(header)}
+
+            for row in csv_reader:
+                if not any(row):  # Skip empty rows
+                    continue
+
+                emp_data = {
+                    "empno": row[header_map["Employee ID"]],
+                    "name_ar": row[header_map["Name (AR)"]],
+                    "name_en": row[header_map["Name (EN)"]],
+                    "hire_date": row[header_map["Hire Date"]],  # Assume DD/MM/YYYY string
+                    "nationality": row[header_map["Nationality"]],
+                    "job_title": row[header_map["Job Title"]],
+                    "manager": row[header_map["Manager"]],
+                    "phone": row[header_map["Phone"]],
+                    "email": row[header_map["Email"]],
+                    "status_name": row[header_map["Employee Status"]],
+                    "section": row[header_map["Section"]],
+                    "department": row[header_map["Department"]]
+                }
+                employees_data.append(emp_data)
+
+        else:
+            return jsonify({"error": "Invalid file type. Please upload a .xlsx or .csv file."}), 400
+
+        if not employees_data:
+            return jsonify({"error": "No data found in the file."}), 400
+
+        # Process the data
+        success, failed, errors = db_connector.bulk_add_employees_from_excel(employees_data)
+
+        if failed > 0:
+            return jsonify({
+                "message": f"Bulk add finished. {success} added, {failed} failed.",
+                "errors": errors
+            }), 422  # Unprocessable Entity
+        else:
+            return jsonify({
+                "message": f"Successfully added {success} employees."
+            }), 201
+
+    except Exception as e:
+        logging.error(f"Error processing bulk upload file: {e}", exc_info=True)
+        return jsonify({"error": f"An error occurred during file processing: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5006))
