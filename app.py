@@ -390,7 +390,72 @@ def bulk_upload_employees():
         logging.error(f"Error processing bulk upload file: {e}", exc_info=True)
         return jsonify({"error": f"An error occurred during file processing: {str(e)}"}), 500
 
+@app.route('/api/employees/export', methods=['GET'])
+def export_employees():
+    if 'user' not in session:
+        return jsonify({"error": "Unauthorized"}), 401
+
+    try:
+        # 1. Get filter parameters from the request, same as the dashboard
+        search_term = request.args.get('search')
+        status = request.args.get('status')
+        filter_type = request.args.get('filter_type')
+
+        # 2. Fetch *all* matching employees. We set a very high page_size.
+        employees, total_rows = db_connector.fetch_archived_employees(
+            page=1,
+            page_size=0,
+            search_term=search_term,
+            status=status,
+            filter_type=filter_type
+        )
+
+        if not employees:
+            return jsonify({"error": "No data to export for this filter"}), 404
+
+        # 3. Define CSV headers based on the dashboard table
+        headers = [
+            "EmpNo", "FullName_EN", "FullName_AR", "Department", "Section",
+            "Status_EN", "Status_AR", "Warrant_Status", "Card_Status", "Card_Expiry"
+        ]
+
+        # 4. Create CSV in-memory
+        si = io.StringIO()
+        cw = csv.writer(si)
+
+        # Write header
+        cw.writerow(headers)
+
+        # Write employee data rows
+        for emp in employees:
+            cw.writerow([
+                emp.get('empno'),
+                emp.get('fullname_en'),
+                emp.get('fullname_ar'),
+                emp.get('department'),
+                emp.get('section'),
+                emp.get('status_en'),
+                emp.get('status_ar'),
+                emp.get('warrant_status'),
+                emp.get('card_status'),
+                emp.get('card_expiry')
+            ])
+
+        # 5. Prepare and return the CSV file as a response
+        output = si.getvalue()
+        si.close()
+
+        return Response(
+            output,
+            mimetype="text/csv",
+            headers={"Content-Disposition": "attachment;filename=employee_export.csv"}
+        )
+
+    except Exception as e:
+        logging.error(f"Error exporting employees: {e}", exc_info=True)
+        return jsonify({"error": str(e)}), 500
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5006))
+    port = int(os.environ.get('HTTP_PLATFORM_PORT', 5006))
     logging.info(f"Starting Migrated Archiving Backend on host 0.0.0.0 port {port}")
     serve(app, host='0.0.0.0', port=port, threads=50)

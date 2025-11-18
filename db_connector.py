@@ -266,12 +266,18 @@ def fetch_archived_employees(page=1, page_size=20, search_term=None, status=None
             total_rows = cursor.fetchone()[0]
 
             fetch_query = f"""
-                SELECT DISTINCT arch.SYSTEM_ID, TRIM(hr.FULLNAME_EN) as FULLNAME_EN, TRIM(hr.FULLNAME_AR) as FULLNAME_AR, TRIM(hr.EMPNO) as EMPNO, TRIM(hr.DEPARTEMENT) as DEPARTMENT, TRIM(hr.SECTION) as SECTION,
-                       TRIM(stat.NAME_ENGLISH) as STATUS_EN, TRIM(stat.NAME_ARABIC) as STATUS_AR
-                {base_query} {final_where_clause} ORDER BY arch.SYSTEM_ID DESC
-                OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY
-            """
-            params.update({'offset': offset, 'page_size': page_size})
+                            SELECT DISTINCT arch.SYSTEM_ID, TRIM(hr.FULLNAME_EN) as FULLNAME_EN, TRIM(hr.FULLNAME_AR) as FULLNAME_AR, TRIM(hr.EMPNO) as EMPNO, TRIM(hr.DEPARTEMENT) as DEPARTMENT, TRIM(hr.SECTION) as SECTION,
+                                   TRIM(stat.NAME_ENGLISH) as STATUS_EN, TRIM(stat.NAME_ARABIC) as STATUS_AR
+                            {base_query} {final_where_clause} ORDER BY arch.SYSTEM_ID DESC
+                        """
+
+            if page_size > 0:
+                fetch_query += " OFFSET :offset ROWS FETCH NEXT :page_size ROWS ONLY"
+                params.update({'offset': offset, 'page_size': page_size})
+            else:
+                params.pop('offset', None)
+                params.pop('page_size', None)
+
             cursor.execute(fetch_query, params)
 
             columns = [c[0].lower() for c in cursor.description]
