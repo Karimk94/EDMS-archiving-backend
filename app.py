@@ -13,12 +13,13 @@ import mimetypes
 import csv
 import io
 import openpyxl
+import datetime
 
 # --- Logging Setup ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=60)
-app.secret_key = os.getenv('FLASK_SECRET_KEY', 'a_very_secret_default_key_replace_me')  # Added default for safety
+app.secret_key = os.getenv('FLASK_SECRET_KEY')
 CORS(app, supports_credentials=True, resources={r"/api/*": {"origins": "*"}})
 
 # --- Security Decorator ---
@@ -270,7 +271,6 @@ def get_document_file(docnumber):
         logging.warning(f"Document not found or retrieval failed for docnumber: {docnumber}")
         return jsonify({"error": "Document not found or could not be retrieved from DMS."}), 404
 
-
 @app.route('/api/employees/bulk-upload', methods=['POST'])
 @editor_required
 def bulk_upload_employees():
@@ -454,6 +454,37 @@ def export_employees():
     except Exception as e:
         logging.error(f"Error exporting employees: {e}", exc_info=True)
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/scheduler/get-expiry-data', methods=['GET'])
+def get_expiry_data():
+    """
+    A secure, read-only endpoint for external schedulers.
+    It checks for a secret key and returns a JSON list of
+    documents expiring within the next 30 days.
+    """
+    # 1. Check for the secret key
+    scheduler_secret = os.getenv('SCHEDULER_SECRET_KEY')
+    auth_header = request.headers.get('X-Scheduler-Secret')
+
+    # Secure the endpoint
+    if not scheduler_secret or not auth_header or auth_header != scheduler_secret:
+        logging.warning("Unauthorized attempt to access scheduler data endpoint.")
+        abort(401)  # Unauthorized
+
+    logging.info("Scheduler data endpoint accessed successfully.")
+
+    try:
+        # 2. Fetch data from the function we created in the previous step
+        # (Ensure fetch_expiring_documents is in your db_connector.py)
+        expiring_docs = db_connector.fetch_expiring_documents(days_ahead=30)
+
+        # 3. Return the raw data as JSON
+        return jsonify(expiring_docs), 200
+
+    except Exception as e:
+        logging.error(f"Error in 'get_expiry_data' endpoint: {e}", exc_info=True)
+        return jsonify({"error": f"An internal error occurred: {str(e)}"}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('HTTP_PLATFORM_PORT', 5006))

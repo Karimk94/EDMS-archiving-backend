@@ -813,3 +813,41 @@ def bulk_add_employees_from_excel(employees_data):
     finally:
         if conn:
             conn.close()
+
+def fetch_expiring_documents(days_ahead=30):
+    """
+    Fetches all documents expiring between today and 'days_ahead' days from now.
+    """
+    conn = get_connection()
+    if not conn:
+        return []
+
+    documents = []
+    try:
+        with conn.cursor() as cursor:
+            query = """
+                    SELECT TRIM(hr.FULLNAME_EN) as FULLNAME_EN, \
+                           TRIM(hr.EMPNO)       as EMPNO, \
+                           TRIM(dt.NAME)        as DOC_NAME, \
+                           doc.EXPIRY
+                    FROM LKP_PTA_EMP_DOCS doc
+                             JOIN LKP_PTA_DOC_TYPES dt ON doc.DOC_TYPE_ID = dt.SYSTEM_ID
+                             JOIN LKP_PTA_EMP_ARCH arch ON doc.PTA_EMP_ARCH_ID = arch.SYSTEM_ID
+                             JOIN lkp_hr_employees hr ON arch.EMPLOYEE_ID = hr.SYSTEM_ID
+                    WHERE doc.DISABLED = '0'
+                      AND doc.EXPIRY IS NOT NULL
+                      AND doc.EXPIRY BETWEEN SYSDATE AND (SYSDATE + :days_ahead)
+                    ORDER BY doc.EXPIRY ASC \
+                    """
+            cursor.execute(query, days_ahead=days_ahead)
+
+            columns = [c[0].lower() for c in cursor.description]
+            documents = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    except oracledb.Error as e:
+        logging.error(f"Oracle Database error in fetch_expiring_documents: {e}", exc_info=True)
+    finally:
+        if conn:
+            conn.close()
+
+    return documents
